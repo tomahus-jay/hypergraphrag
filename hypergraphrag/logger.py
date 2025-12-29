@@ -54,9 +54,9 @@ def setup_logger(
     # Prevent propagation to parent loggers to avoid duplicate logs
     logger.propagate = False
     
-    # Set external libraries log level to WARNING to reduce noise
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("neo4j").setLevel(logging.WARNING)
+    if level != logging.DEBUG:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("neo4j").setLevel(logging.WARNING)
     
     return logger
 

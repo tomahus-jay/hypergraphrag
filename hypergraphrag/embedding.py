@@ -112,7 +112,7 @@ class OpenAIEmbeddingsBackend(EmbeddingBackend):
             )
             return response.data[0].embedding
         except Exception as e:
-            raise RuntimeError(f"OpenAI embedding API call failed: {e}")
+            raise RuntimeError(f"OpenAI embedding API call failed: {e}\n{e.response.text}")
     
     def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         try:
@@ -124,7 +124,7 @@ class OpenAIEmbeddingsBackend(EmbeddingBackend):
             )
             return [item.embedding for item in response.data]
         except Exception as e:
-            raise RuntimeError(f"OpenAI embedding API call failed: {e}")
+            raise RuntimeError(f"OpenAI embedding API call failed: {e}\n{e.response.text}")
     
     @property
     def dimension(self) -> int:
@@ -199,7 +199,7 @@ class HTTPEmbeddingsBackend(EmbeddingBackend):
                 return self._try_alternative_endpoint(text)
                 
         except self.requests.exceptions.RequestException as e:
-            raise RuntimeError(f"HTTP request to embedding server failed: {e}")
+            raise RuntimeError(f"HTTP request to embedding server failed: {e}\n{e.response.text}")
     
     def _try_alternative_endpoint(self, text: str) -> List[float]:
         for endpoint in ["/embed", "/encode", "/v1/embeddings"]:
@@ -249,7 +249,7 @@ class HTTPEmbeddingsBackend(EmbeddingBackend):
                 return [self.generate_embedding(text) for text in texts]
                 
         except self.requests.exceptions.RequestException as e:
-            raise RuntimeError(f"HTTP request to embedding server failed: {e}")
+            raise RuntimeError(f"HTTP request to embedding server failed: {e}\n{e.response.text}")
     
     @property
     def dimension(self) -> int:
