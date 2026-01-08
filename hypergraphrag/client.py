@@ -102,6 +102,12 @@ class HyperGraphRAG:
                 messages.append(f"Error: {status['errors'][0]}")
             return {"healthy": False, "messages": messages, "details": status}
 
+        # Check for errors during index retrieval (even if connected)
+        if status["errors"]:
+            is_healthy = False
+            for err in status["errors"]:
+                messages.append(f"Error during health check: {err}")
+
         # Check dimensions
         for idx_name, idx_dim in status["indexes"].items():
             if idx_dim != current_dim:
