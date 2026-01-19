@@ -62,6 +62,17 @@ class Neo4jManager:
                 except Exception:
                     continue
 
+            # Create index for Batch
+            for index_query in [
+                "CREATE INDEX batch_id_index IF NOT EXISTS FOR (b:Batch) ON (b.id)",
+                "CREATE INDEX ON :Batch(id)"
+            ]:
+                try:
+                    session.run(index_query)
+                    break
+                except Exception:
+                    continue
+
             # Create Vector Index for Hyperedge
             try:
                 session.run("""
@@ -170,21 +181,23 @@ class Neo4jManager:
                     MERGE (e)-[:PARTICIPATES_IN]->(h)
                 """, entity_name=entity_name, hyperedge_id=hyperedge_id)
     
-    def batch_create_entities(self, entities: List[Dict[str, Any]]):
-        """Batch create or update entities with embeddings"""
+    def batch_create_entities(self, entities: List[Dict[str, Any]], batch_id: str):
+        """Batch create or update entities with embeddings (Isolated per batch)"""
         if not entities:
             return
         
         with self.driver.session() as session:
             session.run("""
                 UNWIND $entities AS entity
-                MERGE (e:Entity {name: entity.name})
+                MATCH (b:Batch {id: $batch_id})
+                MERGE (e:Entity {name: entity.name, batch_id: $batch_id})
+                MERGE (e)-[:CREATED_IN]->(b)
                 ON CREATE SET 
                     e.created_at = datetime()
                 SET e.description = COALESCE(entity.description, e.description),
                     e.embedding = entity.vector,
                     e.updated_at = datetime()
-            """, entities=[
+            """, batch_id=batch_id, entities=[
                 {
                     "name": e["name"],
                     "description": e.get("description"),
@@ -193,7 +206,7 @@ class Neo4jManager:
                 for e in entities
             ])
     
-    def batch_create_chunks(self, chunks: List[Dict[str, Any]]):
+    def batch_create_chunks(self, chunks: List[Dict[str, Any]], batch_id: str):
         """Batch create chunks (nodes only, no vector index)"""
         if not chunks:
             return
@@ -201,13 +214,15 @@ class Neo4jManager:
         with self.driver.session() as session:
             session.run("""
                 UNWIND $chunks AS chunk
+                MATCH (b:Batch {id: $batch_id})
                 MERGE (c:Chunk {id: chunk.chunk_id})
+                MERGE (c)-[:CREATED_IN]->(b)
                 ON CREATE SET 
                     c.created_at = datetime()
                 SET c.content = chunk.content,
                     c.metadata = chunk.metadata,
                     c.updated_at = datetime()
-            """, chunks=[
+            """, batch_id=batch_id, chunks=[
                 {
                     "chunk_id": c["chunk_id"],
                     "content": c["content"],
@@ -216,7 +231,7 @@ class Neo4jManager:
                 for c in chunks
             ])
     
-    def batch_create_hyperedges(self, hyperedges: List[Dict[str, Any]]):
+    def batch_create_hyperedges(self, hyperedges: List[Dict[str, Any]], batch_id: str):
         """Batch create hyperedges"""
         if not hyperedges:
             return
@@ -225,14 +240,16 @@ class Neo4jManager:
             # Create hyperedge nodes
             session.run("""
                 UNWIND $hyperedges AS h
-                MERGE (hyperedge:Hyperedge {id: h.hyperedge_id})
+                MATCH (b:Batch {id: $batch_id})
+                MERGE (hyperedge:Hyperedge {id: h.hyperedge_id, batch_id: $batch_id})
+                MERGE (hyperedge)-[:CREATED_IN]->(b)
                 ON CREATE SET hyperedge.created_at = datetime()
                 SET hyperedge.content = h.content,
                     hyperedge.chunk_id = h.chunk_id,
                     hyperedge.metadata = h.metadata,
                     hyperedge.embedding = h.vector,
                     hyperedge.updated_at = datetime()
-            """, hyperedges=[
+            """, batch_id=batch_id, hyperedges=[
                 {
                     "hyperedge_id": h["hyperedge_id"],
                     "content": h["content"],
@@ -250,10 +267,10 @@ class Neo4jManager:
                 
                 session.run("""
                     UNWIND $entity_names AS entity_name
-                    MATCH (e:Entity {name: entity_name})
-                    MATCH (h:Hyperedge {id: $hyperedge_id})
+                    MATCH (e:Entity {name: entity_name, batch_id: $batch_id})
+                    MATCH (h:Hyperedge {id: $hyperedge_id, batch_id: $batch_id})
                     MERGE (e)-[:PARTICIPATES_IN]->(h)
-                """, entity_names=entity_names, hyperedge_id=hyperedge_id)
+                """, batch_id=batch_id, entity_names=entity_names, hyperedge_id=hyperedge_id)
     
     def get_entities_by_hyperedge(self, hyperedge_id: str) -> List[Dict[str, Any]]:
         """Get all entities connected to a hyperedge"""
@@ -408,6 +425,30 @@ class Neo4jManager:
             """, name=entity_name, query_vector=query_vector, limit=limit)
             
             return [dict(record) for record in result]
+
+    def create_batch_node(self, batch_id: str, tags: List[str] = None):
+        """Create a Batch node to track data lineage"""
+        with self.driver.session() as session:
+            session.run("""
+                MERGE (b:Batch {id: $batch_id})
+                ON CREATE SET b.created_at = datetime(), b.tags = $tags
+                ON MATCH SET b.updated_at = datetime(), b.tags = $tags
+            """, batch_id=batch_id, tags=tags or [])
+
+    def delete_batch(self, batch_id: str):
+        """
+        Delete a batch and all its associated data (Strategy 1: Complete Isolation).
+        Since entities, chunks, and hyperedges are isolated per batch, 
+        we can simply delete everything connected to the Batch node.
+        """
+        with self.driver.session() as session:
+            # Delete Batch node and all connected nodes (Chunk, Hyperedge, Entity)
+            # Strategy 1 ensures these nodes are exclusive to this batch.
+            session.run("""
+                MATCH (b:Batch {id: $batch_id})
+                OPTIONAL MATCH (n)-[:CREATED_IN]->(b)
+                DETACH DELETE b, n
+            """, batch_id=batch_id)
 
     def reset_db(self):
         """Delete all nodes and relationships"""

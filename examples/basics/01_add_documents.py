@@ -1,6 +1,7 @@
 """Example: Add documents into Hypergraph RAG"""
 import asyncio
 from hypergraphrag import HyperGraphRAG
+from hypergraphrag.models import IngestionConfig
 
 async def main():
     # Initialize client
@@ -41,9 +42,15 @@ async def main():
         """
     ]
     
+    # Configure Batch
+    config = IngestionConfig(
+        batch_id="example_batch_01",
+        tags=["example", "basics"]
+    )
+    
     # Add data with metadata
-    print("📝 Adding documents into Hypergraph RAG...")
-    await rag.add(
+    print(f"📝 Adding documents into Hypergraph RAG (Batch: {config.batch_id})...")
+    batch_id = await rag.add(
         documents=documents,
         metadata=[
             {"source": "ai_intro", "category": "basic", "topic": "AI"},
@@ -52,11 +59,12 @@ async def main():
             {"source": "vector_db", "category": "intermediate", "topic": "Database"},
             {"source": "graph_db", "category": "intermediate", "topic": "Database"}
         ],
+        config=config,
         batch_size=1,
         max_concurrent_tasks=5
     )
     
-    print("✅ Documents added successfully!")
+    print(f"✅ Documents added successfully! Batch ID: {batch_id}")
     print("   - Documents are chunked and stored")
     print("   - Entities and hyperedges are extracted")
     print("   - Embeddings are generated and stored in Neo4j")
