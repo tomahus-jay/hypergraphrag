@@ -401,17 +401,17 @@ class HyperGraphRAG:
         for he in top_hyperedges:
             entity_names = he.get("entity_names", [])
             
-            he_chunks = []
+            chunk_obj = None
             c_id = he.get("chunk_id")
             if c_id and c_id in chunks_map:
                 c_data = chunks_map[c_id]
                 c_meta = c_data.get("metadata", {})
-                he_chunks.append({
+                chunk_obj = {
                     "id": c_data["id"],
                     "content": c_data["content"],
                     "metadata": c_meta,
                     "entities": [] 
-                })
+                }
             
             # Parse metadata if string
             meta = he.get("metadata", {})
@@ -426,7 +426,7 @@ class HyperGraphRAG:
                 entity_names=entity_names,
                 content=he["content"],
                 chunk_id=c_id,
-                chunks=he_chunks if he_chunks else None,
+                chunk=chunk_obj,
                 metadata=meta
             ))
             

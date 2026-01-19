@@ -75,8 +75,11 @@ async def main():
             print(f"\n{i}. Hyperedge ID: {hyperedge.hyperedge_id}")
             print(f"   Content: {hyperedge.content}")
             print(f"   Entities: {', '.join(hyperedge.entity_names)}")
-            if hyperedge.chunks:
-                print(f"      Source Chunk ID: {hyperedge.chunk_id}")
+            if hyperedge.chunk:
+                print(f"      Source Chunk:")
+                print(f"         - ID: {hyperedge.chunk.id}")
+                print(f"         - Content: {hyperedge.chunk.content}")
+                print(f"         - Metadata: {hyperedge.chunk.metadata}")
     
     # Clean up resources
     rag.close()

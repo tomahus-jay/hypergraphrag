@@ -39,8 +39,13 @@ async def main():
             for j, hyperedge in enumerate(results.hyperedges[:5], 1):
                 print(f"\n   {j}. Content: {hyperedge.content}")
                 print(f"      Entities: {', '.join(hyperedge.entity_names)}")
-                if hyperedge.chunks:
-                    print(f"      Source Chunk ID: {hyperedge.chunk_id}")
+                if hyperedge.chunk:
+                    print(f"      Source Chunk:")
+                    print(f"         - ID: {hyperedge.chunk.id}")
+                    # Truncate content for display if too long
+                    content_preview = hyperedge.chunk.content[:100] + "..." if len(hyperedge.chunk.content) > 100 else hyperedge.chunk.content
+                    print(f"         - Content: {content_preview}")
+                    print(f"         - Metadata: {hyperedge.chunk.metadata}")
         
         print("\n" + "=" * 60 + "\n")
     

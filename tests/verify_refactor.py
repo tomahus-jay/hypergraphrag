@@ -83,11 +83,15 @@ async def verify():
             he = result.hyperedges[0]
             print(f"Hyperedge 1 Content: {he.content}")
             print(f"Hyperedge 1 ChunkID: {he.chunk_id}")
+            if he.chunk:
+                 print(f"Hyperedge 1 Source Chunk: {he.chunk.id}")
         
         # Assertions
         assert len(result.hyperedges) == 1
         assert result.hyperedges[0].hyperedge_id == "h1"
         assert result.hyperedges[0].chunk_id == "c1"
+        assert result.hyperedges[0].chunk is not None
+        assert result.hyperedges[0].chunk.id == "c1"
         # Check that we DO actually call the new Neo4j method
         mock_neo4j_instance.get_best_hyperedges_with_entities.assert_called_once()
         

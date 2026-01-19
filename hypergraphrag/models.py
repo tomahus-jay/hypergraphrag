@@ -24,7 +24,7 @@ class Hyperedge(BaseModel):
     content: str = Field(..., description="Knowledge content shared by these entities")
     hyperedge_id: Optional[str] = Field(None, description="Unique hyperedge identifier")
     chunk_id: Optional[str] = Field(None, description="Source chunk identifier")
-    chunks: Optional[List["Chunk"]] = Field(None, description="Chunks associated with this hyperedge (populated during query)")
+    chunk: Optional["Chunk"] = Field(None, description="Source chunk associated with this hyperedge (populated during query)")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
     
     class Config:
