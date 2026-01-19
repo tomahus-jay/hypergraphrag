@@ -5,11 +5,12 @@ import asyncio
 import time
 import json
 import math
+import uuid
 from .neo4j_manager import Neo4jManager
 from .embedding import EmbeddingGenerator
 from .text_processor import TextProcessor
 from .llm_extractor import LLMExtractor
-from .models import QueryResult, Hyperedge
+from .models import QueryResult, Hyperedge, IngestionConfig
 from .logger import setup_logger
 
 logger = setup_logger("hypergraphrag.client")
@@ -133,17 +134,26 @@ class HyperGraphRAG:
         self,
         documents: List[str],
         metadata: Optional[List[Dict[str, Any]]] = None,
+        config: Optional[IngestionConfig] = None,
         batch_size: int = 10,
         max_concurrent_tasks: int = DEFAULT_MAX_CONCURRENT_TASKS,
         show_progress: bool = True
-    ) -> None:
+    ) -> str:
         """
         Insert document data and create hypergraph structure with async batch processing.
-        Displays a progress bar if tqdm is available and show_progress is True.
+        Returns the batch_id.
         """
+        if config is None:
+            config = IngestionConfig(batch_id=str(uuid.uuid4()), tags=[])
+            
+        # Create Batch Node
+        self.neo4j.create_batch_node(config.batch_id, config.tags)
+        logger.info(f"Started ingestion for batch: {config.batch_id}")
+        
         stream = self.add_stream(
             documents, 
             metadata, 
+            config,
             batch_size, 
             max_concurrent_tasks
         )
@@ -161,7 +171,7 @@ class HyperGraphRAG:
                 if show_progress and tqdm:
                     total_chunks = update['total_chunks']
                     total_batches = math.ceil(total_chunks / batch_size)
-                    pbar = tqdm(total=total_batches, desc="Processing Batches", unit="batch")
+                    pbar = tqdm(total=total_batches, desc=f"Batch {config.batch_id[:8]}", unit="batch")
                 
             elif status == "processing":
                 total_batches = update["total_batches"]
@@ -169,7 +179,7 @@ class HyperGraphRAG:
                 
                 # Initialize pbar if not exists (fallback)
                 if pbar is None and show_progress and tqdm:
-                    pbar = tqdm(total=total_batches, desc="Processing Batches", unit="batch")
+                    pbar = tqdm(total=total_batches, desc=f"Batch {config.batch_id[:8]}", unit="batch")
                 
                 if pbar:
                     pbar.update(1)
@@ -192,23 +202,39 @@ class HyperGraphRAG:
                     
                 stats = update["total_stats"]
                 logger.info(
-                    f"Successfully created {stats['chunks']} chunks, "
-                    f"{stats['entities']} entities, and {stats['hyperedges']} hyperedges (Total)"
+                    f"Batch {config.batch_id} complete. Created {stats['chunks']} chunks, "
+                    f"{stats['entities']} entities, and {stats['hyperedges']} hyperedges."
                 )
         
         if pbar:
             pbar.close()
+            
+        return config.batch_id
+
+    def delete(self, batch_id: str):
+        """
+        Delete a batch and all its associated data (Rollback).
+        """
+        logger.info(f"Deleting batch {batch_id}...")
+        self.neo4j.delete_batch(batch_id)
+        logger.info(f"Batch {batch_id} deleted.")
 
     async def add_stream(
         self,
         documents: List[str],
         metadata: Optional[List[Dict[str, Any]]] = None,
+        config: Optional[IngestionConfig] = None,
         batch_size: int = 10,
         max_concurrent_tasks: int = DEFAULT_MAX_CONCURRENT_TASKS
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         Insert document data and yield progress updates using an iterator pattern.
         """
+        if config is None:
+            config = IngestionConfig(batch_id=str(uuid.uuid4()), tags=[])
+            # Ensure batch node exists if calling add_stream directly
+            self.neo4j.create_batch_node(config.batch_id, config.tags)
+            
         all_chunks = self._chunk_documents(documents, metadata)
         yield {"status": "chunking_complete", "total_chunks": len(all_chunks)}
         
@@ -228,7 +254,7 @@ class HyperGraphRAG:
         
         tasks = [
             self._process_batch_with_semaphore(
-                i, batch, db_semaphore, task_semaphore
+                i, batch, db_semaphore, task_semaphore, config.batch_id
             ) 
             for i, batch in enumerate(chunk_batches)
         ]
@@ -289,17 +315,19 @@ class HyperGraphRAG:
         batch_idx: int,
         chunk_batch: List[Dict[str, Any]],
         db_semaphore: asyncio.Semaphore,
-        task_semaphore: asyncio.Semaphore
+        task_semaphore: asyncio.Semaphore,
+        batch_id: str
     ) -> Dict[str, Any]:
         """Wrapper to process batch with semaphore"""
         async with task_semaphore:
-            return await self._process_chunk_batch_and_store(batch_idx, chunk_batch, db_semaphore)
+            return await self._process_chunk_batch_and_store(batch_idx, chunk_batch, db_semaphore, batch_id)
 
     async def _process_chunk_batch_and_store(
         self,
         batch_idx: int,
         chunk_batch: List[Dict[str, Any]],
-        db_semaphore: asyncio.Semaphore
+        db_semaphore: asyncio.Semaphore,
+        batch_id: str
     ) -> Dict[str, Any]:
         """Process a batch of chunks: Extract -> Embed -> Store"""
         
@@ -316,7 +344,8 @@ class HyperGraphRAG:
             await self._store_batch(
                 batch_entities, batch_hyperedges,
                 chunk_batch, hyperedge_embeddings,
-                entity_embeddings
+                entity_embeddings,
+                batch_id
             )
         
         return {
@@ -514,7 +543,8 @@ class HyperGraphRAG:
         batch_hyperedges: List[Dict[str, Any]],
         chunk_batch: List[Dict[str, Any]],
         hyperedge_embeddings: List[List[float]],
-        entity_embeddings: List[List[float]]
+        entity_embeddings: List[List[float]],
+        batch_id: str
     ) -> None:
         """Store extracted data to Neo4j (including vectors for entities and hyperedges)"""
         import time
@@ -523,21 +553,21 @@ class HyperGraphRAG:
         # 1. Store entities with vectors
         t0 = time.time()
         if batch_entities:
-            await self._store_entities(batch_entities, entity_embeddings)
+            await self._store_entities(batch_entities, entity_embeddings, batch_id)
         t1 = time.time()
         logger.debug(f"[Profile] Store Entities ({len(batch_entities)}): {t1-t0:.4f}s")
         
         # 2. Store Chunks (NO vectors)
         t0 = time.time()
         if chunk_batch:
-            await self._store_chunks(chunk_batch)
+            await self._store_chunks(chunk_batch, batch_id)
         t1 = time.time()
         logger.debug(f"[Profile] Store Chunks ({len(chunk_batch)}): {t1-t0:.4f}s")
 
         # 3. Store Hyperedges with vectors
         t0 = time.time()
         if batch_hyperedges:
-            await self._store_hyperedges(batch_hyperedges, hyperedge_embeddings)
+            await self._store_hyperedges(batch_hyperedges, hyperedge_embeddings, batch_id)
         t1 = time.time()
         logger.debug(f"[Profile] Store Hyperedges ({len(batch_hyperedges)}): {t1-t0:.4f}s")
         
@@ -547,7 +577,8 @@ class HyperGraphRAG:
     async def _store_entities(
         self, 
         batch_entities: Dict[str, Dict[str, Any]], 
-        entity_embeddings: List[List[float]]
+        entity_embeddings: List[List[float]],
+        batch_id: str
     ) -> None:
         """Helper to store entities"""
         entities_to_store = []
@@ -566,10 +597,11 @@ class HyperGraphRAG:
         
         await asyncio.to_thread(
             self.neo4j.batch_create_entities, 
-            entities_to_store
+            entities_to_store,
+            batch_id
         )
 
-    async def _store_chunks(self, chunk_batch: List[Dict[str, Any]]) -> None:
+    async def _store_chunks(self, chunk_batch: List[Dict[str, Any]], batch_id: str) -> None:
         """Helper to store chunks"""
         chunks_to_store = [
             {
@@ -581,13 +613,15 @@ class HyperGraphRAG:
         ]
         await asyncio.to_thread(
             self.neo4j.batch_create_chunks,
-            chunks_to_store
+            chunks_to_store,
+            batch_id
         )
 
     async def _store_hyperedges(
         self, 
         batch_hyperedges: List[Dict[str, Any]], 
-        hyperedge_embeddings: List[List[float]]
+        hyperedge_embeddings: List[List[float]],
+        batch_id: str
     ) -> None:
         """Helper to store hyperedges"""
         hyperedges_to_store = []
@@ -598,7 +632,8 @@ class HyperGraphRAG:
 
         await asyncio.to_thread(
             self.neo4j.batch_create_hyperedges,
-            hyperedges_to_store
+            hyperedges_to_store,
+            batch_id
         )
 
     async def _search_initial_entities(

@@ -5,6 +5,12 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 
 
+class IngestionConfig(BaseModel):
+    """Configuration for data ingestion batch"""
+    batch_id: str = Field(..., description="Batch Identifier")
+    tags: List[str] = Field(default_factory=list, description="Batch tags")
+
+
 class Entity(BaseModel):
     """Entity model"""
     name: str = Field(..., description="Canonical name of the entity")
