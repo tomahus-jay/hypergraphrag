@@ -145,14 +145,11 @@ This project supports various LLM and Embedding services. It automatically detec
 
 ## Evaluation Results
 
-Evaluation performed on **HotpotQA** dataset (1000 samples) using Ragas metrics 
-(Graph generation using **grok-4-1-fast-non-reasoning** and evaluation with **gpt-5-nano-2025-08-07**).
+Evaluation performed on **HotpotQA** dataset (1000 samples, graph generation and evaluation with **gpt-5-nano-2025-08-07**).
 
-![Evaluation Results](docs/images/evaluation_result.png)
-
-**Ragas Metrics:**
-- **Context Recall**: 0.4894
-- **Context Precision**: 0.6579
+- **Average Precision**: 0.7006
+- **Average Recall**: 0.6309
+- **Average SP-F1**: 0.6221
 
 ## Project Structure
 
