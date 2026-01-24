@@ -465,18 +465,22 @@ class Neo4jManager:
             doc_ids=focus_doc_ids)
             
             results = []
-            seen_names = set()
+            seen_keys = set()
             
             raw_records = list(result)
             raw_records.sort(key=lambda x: x["score"], reverse=True)
             
             for record in raw_records:
                 node = record["node"]
-                name = node["name"]
+                data = dict(node)
+                name = data.get("name")
+                doc_id = data.get("doc_id")
                 
-                if name not in seen_names:
-                    seen_names.add(name)
-                    data = dict(node)
+                # Deduplicate by (name, doc_id) to preserve isolation
+                key = (name, doc_id) if doc_id else name
+                
+                if key not in seen_keys:
+                    seen_keys.add(key)
                     results.append({
                         **data,
                         "score": record["score"],

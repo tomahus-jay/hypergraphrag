@@ -80,9 +80,7 @@ async def main():
             for he in result.hyperedges:
                 if he.chunk:
                     retrieved_chunks.append(he.chunk.content)
-                else:
-                    # Fallback if chunk not populated (should rely on chunk data)
-                    retrieved_chunks.append(he.content)
+                # Removed fallback to he.content to ensure we only evaluate real retrieved chunks
             
             # Take top K unique contents
             retrieved_contexts = list(dict.fromkeys(retrieved_chunks))[:TOP_K]
