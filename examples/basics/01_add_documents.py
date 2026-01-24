@@ -41,11 +41,9 @@ async def main():
         """
     ]
     
-    batch_id="example_batch_01"
-
     # Add data with metadata
-    print(f"📝 Adding documents into Hypergraph RAG (Batch: {batch_id})...")
-    batch_id = await rag.add(
+    print(f"📝 Adding documents into Hypergraph RAG...")
+    doc_ids = await rag.add(
         documents=documents,
         metadata=[
             {"source": "ai_intro", "category": "basic", "topic": "AI"},
@@ -54,12 +52,11 @@ async def main():
             {"source": "vector_db", "category": "intermediate", "topic": "Database"},
             {"source": "graph_db", "category": "intermediate", "topic": "Database"}
         ],
-        batch_id=batch_id,
         batch_size=1,
         max_concurrent_tasks=5
     )
     
-    print(f"✅ Documents added successfully! Batch ID: {batch_id}")
+    print(f"✅ Documents added successfully! Doc IDs: {doc_ids}")
     print("   - Documents are chunked and stored")
     print("   - Entities and hyperedges are extracted")
     print("   - Embeddings are generated and stored in Neo4j")

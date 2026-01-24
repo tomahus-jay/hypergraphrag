@@ -52,15 +52,13 @@ async def main():
         {"source": "graph_db", "category": "intermediate", "topic": "Database"}
     ]
     
-    batch_id = "stream_batch_01"
-    print(f"🚀 Starting Stream Add (Batch: {batch_id})...")
+    print(f"🚀 Starting Stream Add...")
     
     # Add data using stream method with manual logging
     # Using batch_size=1 to see granular updates for this small dataset
     async for update in rag.add_stream(
         documents=documents,
         metadata=metadata,
-        batch_id=batch_id,
         batch_size=1,
         max_concurrent_tasks=5
     ):

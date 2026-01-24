@@ -62,10 +62,10 @@ class Neo4jManager:
                 except Exception:
                     continue
 
-            # Create index for Batch
+            # Create index for Document (replacing Batch)
             for index_query in [
-                "CREATE INDEX batch_id_index IF NOT EXISTS FOR (b:Batch) ON (b.id)",
-                "CREATE INDEX ON :Batch(id)"
+                "CREATE INDEX document_id_index IF NOT EXISTS FOR (d:Document) ON (d.id)",
+                "CREATE INDEX ON :Document(id)"
             ]:
                 try:
                     session.run(index_query)
@@ -96,6 +96,15 @@ class Neo4jManager:
                         `vector.similarity_function`: 'cosine'
                     }}
                 """, dim=self.vector_dimension)
+            except Exception:
+                pass
+
+            # Create Chunk Full-Text Index for BM25 Search
+            try:
+                session.run("""
+                    CREATE FULLTEXT INDEX chunk_fulltext IF NOT EXISTS
+                    FOR (c:Chunk) ON EACH [c.content]
+                """)
             except Exception:
                 pass
     
@@ -130,7 +139,7 @@ class Neo4jManager:
             status["errors"].append(str(e))
             
         return status
-
+    
     def create_or_update_entity(
         self,
         entity_name: str,
@@ -181,32 +190,33 @@ class Neo4jManager:
                     MERGE (e)-[:PARTICIPATES_IN]->(h)
                 """, entity_name=entity_name, hyperedge_id=hyperedge_id)
     
-    def batch_create_entities(self, entities: List[Dict[str, Any]], batch_id: str):
-        """Batch create or update entities with embeddings (Isolated per batch)"""
+    def batch_create_entities(self, entities: List[Dict[str, Any]]):
+        """Batch create or update entities with embeddings (Isolated per Document)"""
         if not entities:
             return
         
         with self.driver.session() as session:
             session.run("""
                 UNWIND $entities AS entity
-                MATCH (b:Batch {id: $batch_id})
-                MERGE (e:Entity {name: entity.name, batch_id: $batch_id})
-                MERGE (e)-[:CREATED_IN]->(b)
+                MATCH (d:Document {id: entity.doc_id})
+                MERGE (e:Entity {name: entity.name, doc_id: entity.doc_id})
+                MERGE (e)-[:FROM_DOCUMENT]->(d)
                 ON CREATE SET 
                     e.created_at = datetime()
                 SET e.description = COALESCE(entity.description, e.description),
                     e.embedding = entity.vector,
                     e.updated_at = datetime()
-            """, batch_id=batch_id, entities=[
+            """, entities=[
                 {
                     "name": e["name"],
                     "description": e.get("description"),
-                    "vector": e.get("vector")
+                    "vector": e.get("vector"),
+                    "doc_id": e["doc_id"]
                 }
                 for e in entities
             ])
     
-    def batch_create_chunks(self, chunks: List[Dict[str, Any]], batch_id: str):
+    def batch_create_chunks(self, chunks: List[Dict[str, Any]]):
         """Batch create chunks (nodes only, no vector index)"""
         if not chunks:
             return
@@ -214,24 +224,25 @@ class Neo4jManager:
         with self.driver.session() as session:
             session.run("""
                 UNWIND $chunks AS chunk
-                MATCH (b:Batch {id: $batch_id})
+                MATCH (d:Document {id: chunk.doc_id})
                 MERGE (c:Chunk {id: chunk.chunk_id})
-                MERGE (c)-[:CREATED_IN]->(b)
+                MERGE (c)-[:FROM_DOCUMENT]->(d)
                 ON CREATE SET 
                     c.created_at = datetime()
                 SET c.content = chunk.content,
                     c.metadata = chunk.metadata,
                     c.updated_at = datetime()
-            """, batch_id=batch_id, chunks=[
+            """, chunks=[
                 {
                     "chunk_id": c["chunk_id"],
                     "content": c["content"],
-                    "metadata": json.dumps(c.get("metadata", {}), ensure_ascii=False) if isinstance(c.get("metadata"), dict) else c.get("metadata", "{}")
+                    "metadata": json.dumps(c.get("metadata", {}), ensure_ascii=False) if isinstance(c.get("metadata"), dict) else c.get("metadata", "{}"),
+                    "doc_id": c["doc_id"]
                 }
                 for c in chunks
             ])
     
-    def batch_create_hyperedges(self, hyperedges: List[Dict[str, Any]], batch_id: str):
+    def batch_create_hyperedges(self, hyperedges: List[Dict[str, Any]]):
         """Batch create hyperedges"""
         if not hyperedges:
             return
@@ -240,37 +251,40 @@ class Neo4jManager:
             # Create hyperedge nodes
             session.run("""
                 UNWIND $hyperedges AS h
-                MATCH (b:Batch {id: $batch_id})
-                MERGE (hyperedge:Hyperedge {id: h.hyperedge_id, batch_id: $batch_id})
-                MERGE (hyperedge)-[:CREATED_IN]->(b)
+                MATCH (d:Document {id: h.doc_id})
+                MERGE (hyperedge:Hyperedge {id: h.hyperedge_id, doc_id: h.doc_id})
+                MERGE (hyperedge)-[:FROM_DOCUMENT]->(d)
                 ON CREATE SET hyperedge.created_at = datetime()
                 SET hyperedge.content = h.content,
                     hyperedge.chunk_id = h.chunk_id,
                     hyperedge.metadata = h.metadata,
                     hyperedge.embedding = h.vector,
                     hyperedge.updated_at = datetime()
-            """, batch_id=batch_id, hyperedges=[
+            """, hyperedges=[
                 {
                     "hyperedge_id": h["hyperedge_id"],
                     "content": h["content"],
                     "chunk_id": h.get("chunk_id"),
                     "metadata": json.dumps(h.get("metadata", {}), ensure_ascii=False),
-                    "vector": h.get("vector")
+                    "vector": h.get("vector"),
+                    "doc_id": h["doc_id"]
                 }
                 for h in hyperedges
             ])
             
             # Connect entities to hyperedges
+            # Entities must also match the doc_id to ensure we are connecting to the correct isolated entity
             for hyperedge in hyperedges:
                 entity_names = hyperedge["entity_names"]
                 hyperedge_id = hyperedge["hyperedge_id"]
+                doc_id = hyperedge["doc_id"]
                 
                 session.run("""
                     UNWIND $entity_names AS entity_name
-                    MATCH (e:Entity {name: entity_name, batch_id: $batch_id})
-                    MATCH (h:Hyperedge {id: $hyperedge_id, batch_id: $batch_id})
+                    MATCH (e:Entity {name: entity_name, doc_id: $doc_id})
+                    MATCH (h:Hyperedge {id: $hyperedge_id, doc_id: $doc_id})
                     MERGE (e)-[:PARTICIPATES_IN]->(h)
-                """, batch_id=batch_id, entity_names=entity_names, hyperedge_id=hyperedge_id)
+                """, doc_id=doc_id, entity_names=entity_names, hyperedge_id=hyperedge_id)
     
     def get_entities_by_hyperedge(self, hyperedge_id: str) -> List[Dict[str, Any]]:
         """Get all entities connected to a hyperedge"""
@@ -397,6 +411,80 @@ class Neo4jManager:
                 })
             return results
 
+    def get_top_documents_by_bm25(self, query_text: str, top_k: int = 3) -> List[str]:
+        """
+        BM25 search for Chunks to identify relevant Documents.
+        """
+        with self.driver.session() as session:
+            result = session.run("""
+                CALL db.index.fulltext.queryNodes("chunk_fulltext", $query, {limit: 50}) 
+                YIELD node as chunk, score
+                
+                MATCH (chunk)-[:FROM_DOCUMENT]->(d:Document)
+                
+                WITH d, sum(score) as doc_score
+                ORDER BY doc_score DESC
+                LIMIT $k
+                
+                RETURN d.id as doc_id
+            """, query=query_text, k=top_k)
+            
+            return [record["doc_id"] for record in result]
+
+    def search_vectors_with_document_bias(
+        self, 
+        query_vector: List[float], 
+        top_k_global: int = 5,
+        top_k_local: int = 5,
+        focus_doc_ids: List[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Hybrid search: Global Vector Search + Local (Document-biased) Vector Search
+        """
+        if not focus_doc_ids:
+            return self.search_vectors(query_vector, top_k_global + top_k_local, "Entity")
+
+        with self.driver.session() as session:
+            result = session.run("""
+                CALL db.index.vector.queryNodes('entity_embedding_index', $k_global, $query_vector)
+                YIELD node, score
+                RETURN node, score, "global" as source
+                
+                UNION
+                
+                CALL db.index.vector.queryNodes('entity_embedding_index', 100, $query_vector)
+                YIELD node, score
+                MATCH (node)
+                WHERE node.doc_id IN $doc_ids
+                RETURN node, score, "focused" as source
+                LIMIT $k_local
+            """, 
+            k_global=top_k_global, 
+            k_local=top_k_local, 
+            query_vector=query_vector, 
+            doc_ids=focus_doc_ids)
+            
+            results = []
+            seen_names = set()
+            
+            raw_records = list(result)
+            raw_records.sort(key=lambda x: x["score"], reverse=True)
+            
+            for record in raw_records:
+                node = record["node"]
+                name = node["name"]
+                
+                if name not in seen_names:
+                    seen_names.add(name)
+                    data = dict(node)
+                    results.append({
+                        **data,
+                        "score": record["score"],
+                        "source_strategy": record["source"]
+                    })
+            
+            return results[:(top_k_global + top_k_local)]
+
     def get_best_hyperedges_with_entities(
         self,
         entity_name: str,
@@ -426,29 +514,28 @@ class Neo4jManager:
             
             return [dict(record) for record in result]
 
-    def create_batch_node(self, batch_id: str, tags: List[str] = None):
-        """Create a Batch node to track data lineage"""
+    def create_document_node(self, doc_id: str, tags: List[str] = None):
+        """Create a Document node to track data lineage"""
         with self.driver.session() as session:
             session.run("""
-                MERGE (b:Batch {id: $batch_id})
-                ON CREATE SET b.created_at = datetime(), b.tags = $tags
-                ON MATCH SET b.updated_at = datetime(), b.tags = $tags
-            """, batch_id=batch_id, tags=tags or [])
+                MERGE (d:Document {id: $doc_id})
+                ON CREATE SET d.created_at = datetime(), d.tags = $tags
+                ON MATCH SET d.updated_at = datetime(), d.tags = $tags
+            """, doc_id=doc_id, tags=tags or [])
 
-    def delete_batch(self, batch_id: str):
+    def delete_document(self, doc_id: str):
         """
-        Delete a batch and all its associated data (Strategy 1: Complete Isolation).
-        Since entities, chunks, and hyperedges are isolated per batch, 
-        we can simply delete everything connected to the Batch node.
+        Delete a document and all its associated data (Strategy 1: Complete Isolation).
+        Since entities, chunks, and hyperedges are isolated per document, 
+        we can simply delete everything connected to the Document node.
         """
         with self.driver.session() as session:
-            # Delete Batch node and all connected nodes (Chunk, Hyperedge, Entity)
-            # Strategy 1 ensures these nodes are exclusive to this batch.
+            # Delete Document node and all connected nodes (Chunk, Hyperedge, Entity)
             session.run("""
-                MATCH (b:Batch {id: $batch_id})
-                OPTIONAL MATCH (n)-[:CREATED_IN]->(b)
-                DETACH DELETE b, n
-            """, batch_id=batch_id)
+                MATCH (d:Document {id: $doc_id})
+                OPTIONAL MATCH (n)-[:FROM_DOCUMENT]->(d)
+                DETACH DELETE d, n
+            """, doc_id=doc_id)
 
     def reset_db(self):
         """Delete all nodes and relationships"""
@@ -461,6 +548,9 @@ class Neo4jManager:
                 session.run("DROP INDEX chunk_id_index IF EXISTS")
                 session.run("DROP INDEX chunk_embedding_index IF EXISTS")
                 session.run("DROP INDEX entity_embedding_index IF EXISTS")
+                session.run("DROP INDEX chunk_fulltext IF EXISTS")
+                session.run("DROP INDEX batch_id_index IF EXISTS")
+                session.run("DROP INDEX document_id_index IF EXISTS")
             except Exception:
                 pass
             

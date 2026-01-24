@@ -143,8 +143,8 @@ class LLMExtractor:
                     # Convert ExtractedHyperedge to full Hyperedge model
                     new_hyperedge = Hyperedge(
                         entity_names=validated_names,
-                        content=hyperedge.content
-                        # hyperedge_id and metadata default to None
+                        content=hyperedge.content,
+                        metadata={"attributes": getattr(hyperedge, "attributes", [])}
                     )
                     normalized_hyperedges.append(new_hyperedge)
             

@@ -42,6 +42,7 @@ class ExtractedHyperedge(BaseModel):
     """
     entity_names: List[str] = Field(..., description="List of entity names connected by this hyperedge")
     content: str = Field(..., description="Knowledge content shared by these entities")
+    attributes: List[str] = Field(default_factory=list, description="Contextual attributes like time, location, or manner")
     
     class Config:
         use_enum_values = True

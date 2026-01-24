@@ -43,18 +43,15 @@ async def main():
     # Reset database for clean test
     rag.reset_database()
     
-    batch_id="demo_batch_e2e"
-
     # Insert data
-    print(f"📝 Inserting documents (Batch: {batch_id})...")
-    await rag.add(
+    print(f"📝 Inserting documents...")
+    doc_ids = await rag.add(
         documents=documents,
         metadata=[
             {"source": "report_1", "category": "corporate_leak"},
             {"source": "news_article", "category": "geopolitics"},
             {"source": "investigation_memo", "category": "financial_crime"}
-        ],
-        batch_id=batch_id
+        ]
     )
     
     # Query search using local search (entity-centric graph traversal)

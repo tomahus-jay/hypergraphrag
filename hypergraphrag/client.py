@@ -49,9 +49,7 @@ class HyperGraphRAG:
         chunk_size: int = 500,
         chunk_overlap: int = 50
     ):
-        """
-        Initialize Hypergraph RAG client
-        """
+        """Initialize Hypergraph RAG client"""
         # Initialize Embedding first to get dimension
         self.embedding = EmbeddingGenerator(
             model_name=embedding_model,
@@ -94,8 +92,6 @@ class HyperGraphRAG:
         Returns detailed status including connection state and dimension compatibility.
         """
         status = self.neo4j.check_connection()
-        
-        # Add logic to compare dimensions
         current_dim = self.embedding.dimension
         is_healthy = status["connected"]
         messages = []
@@ -106,13 +102,11 @@ class HyperGraphRAG:
                 messages.append(f"Error: {status['errors'][0]}")
             return {"healthy": False, "messages": messages, "details": status}
 
-        # Check for errors during index retrieval (even if connected)
         if status["errors"]:
             is_healthy = False
             for err in status["errors"]:
                 messages.append(f"Error during health check: {err}")
 
-        # Check dimensions
         for idx_name, idx_dim in status["indexes"].items():
             if idx_dim != current_dim:
                 is_healthy = False
@@ -134,50 +128,47 @@ class HyperGraphRAG:
         self,
         documents: List[str],
         metadata: Optional[List[Dict[str, Any]]] = None,
-        batch_id: Optional[str] = None,
+        doc_ids: Optional[List[str]] = None,
         batch_size: int = 10,
         max_concurrent_tasks: int = DEFAULT_MAX_CONCURRENT_TASKS,
         show_progress: bool = True
-    ) -> str:
+    ) -> List[str]:
         """
         Insert document data and create hypergraph structure with async batch processing.
-        Returns the batch_id.
+        Returns the doc_ids.
         """
-        if batch_id is None:
-            batch_id = str(uuid.uuid4())
+        if doc_ids is None:
+            doc_ids = [str(uuid.uuid4()) for _ in documents]
+        elif len(doc_ids) != len(documents):
+            raise ValueError("doc_ids length must match documents length")
             
-        logger.info(f"Started ingestion for batch: {batch_id}")
+        logger.info(f"Started ingestion for {len(documents)} documents")
         
         stream = self.add_stream(
             documents, 
             metadata, 
-            batch_id,
+            doc_ids,
             batch_size, 
             max_concurrent_tasks
         )
         
         pbar = None
-            
         async for update in stream:
             status = update.get("status")
             
             if status == "chunking_complete":
-                # Chunking done, we might want to log this but pbar is for batches
                 logger.debug(f"Chunking complete: {update['total_chunks']} chunks created.")
-                
-                # Initialize pbar immediately after chunking
                 if show_progress and tqdm:
                     total_chunks = update['total_chunks']
                     total_batches = math.ceil(total_chunks / batch_size)
-                    pbar = tqdm(total=total_batches, desc=f"Batch {batch_id[:8]}", unit="batch")
+                    pbar = tqdm(total=total_batches, desc="Processing", unit="batch")
                 
             elif status == "processing":
                 total_batches = update["total_batches"]
                 completed = update["completed_batches"]
                 
-                # Initialize pbar if not exists (fallback)
                 if pbar is None and show_progress and tqdm:
-                    pbar = tqdm(total=total_batches, desc=f"Batch {batch_id[:8]}", unit="batch")
+                    pbar = tqdm(total=total_batches, desc="Processing", unit="batch")
                 
                 if pbar:
                     pbar.update(1)
@@ -186,50 +177,49 @@ class HyperGraphRAG:
                         "Edge": update["total_stats"]["hyperedges"]
                     })
                 else:
-                    # Fallback logging if no tqdm
                     logger.info(
                         f"Progress: {completed}/{total_batches} ({update['progress']:.1f}%) "
                         f"| Ent: {update['total_stats']['entities']}, Edge: {update['total_stats']['hyperedges']}"
                     )
             
             elif status == "complete":
-                # Close pbar BEFORE logging completion
                 if pbar:
                     pbar.close()
                     pbar = None
                     
                 stats = update["total_stats"]
                 logger.info(
-                    f"Batch {batch_id} complete. Created {stats['chunks']} chunks, "
+                    f"Ingestion complete. Created {stats['chunks']} chunks, "
                     f"{stats['entities']} entities, and {stats['hyperedges']} hyperedges."
                 )
         
         if pbar:
             pbar.close()
             
-        return batch_id
+        return doc_ids
 
     async def add_stream(
         self,
         documents: List[str],
         metadata: Optional[List[Dict[str, Any]]] = None,
-        batch_id: Optional[str] = None,
+        doc_ids: Optional[List[str]] = None,
         batch_size: int = 10,
         max_concurrent_tasks: int = DEFAULT_MAX_CONCURRENT_TASKS
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         Insert document data and yield progress updates using an iterator pattern.
         """
-        if batch_id is None:
-            batch_id = str(uuid.uuid4())
+        if doc_ids is None:
+            doc_ids = [str(uuid.uuid4()) for _ in documents]
+        elif len(doc_ids) != len(documents):
+            raise ValueError("doc_ids length must match documents length")
         
-        # Ensure batch node exists (Create/Merge)
-        self.neo4j.create_batch_node(batch_id)
+        for doc_id in doc_ids:
+            self.neo4j.create_document_node(doc_id)
             
-        all_chunks = self._chunk_documents(documents, metadata)
+        all_chunks = self._chunk_documents(documents, metadata, doc_ids)
         yield {"status": "chunking_complete", "total_chunks": len(all_chunks)}
         
-        # Step 2: Extract entities and hyperedges AND Store in parallel batches (async pipeline)
         logger.debug("Starting extraction and storage pipeline...")
         
         chunk_batches = [
@@ -239,13 +229,12 @@ class HyperGraphRAG:
         
         total_batches = len(chunk_batches)
         
-        # Create semaphores
         db_semaphore = asyncio.Semaphore(1)
         task_semaphore = asyncio.Semaphore(max_concurrent_tasks)
         
         tasks = [
             self._process_batch_with_semaphore(
-                i, batch, db_semaphore, task_semaphore, batch_id
+                i, batch, db_semaphore, task_semaphore
             ) 
             for i, batch in enumerate(chunk_batches)
         ]
@@ -257,7 +246,6 @@ class HyperGraphRAG:
             result = await future
             completed_batches += 1
             
-            # Aggregate stats
             total_stats["entities"] += result["entities"]
             total_stats["hyperedges"] += result["hyperedges"]
             total_stats["chunks"] += result["chunks"]
@@ -281,19 +269,14 @@ class HyperGraphRAG:
         query_text: str,
         top_n: int = 10
     ) -> QueryResult:
-        """
-        Main query interface for Hypergraph RAG.
-        """
-        # max_hops is currently ignored in simplified local search
+        """Main query interface for Hypergraph RAG."""
         return await self._local_search(query_text, top_n=top_n)
 
-    def delete(self, batch_id: str):
-        """
-        Delete a batch and all its associated data (Rollback).
-        """
-        logger.info(f"Deleting batch {batch_id}...")
-        self.neo4j.delete_batch(batch_id)
-        logger.info(f"Batch {batch_id} deleted.")
+    def delete(self, doc_id: str):
+        """Delete a document and all its associated data (Rollback)."""
+        logger.info(f"Deleting document {doc_id}...")
+        self.neo4j.delete_document(doc_id)
+        logger.info(f"Document {doc_id} deleted.")
 
     def reset_database(self):
         """Reset Neo4j graph (including vectors)"""
@@ -314,23 +297,21 @@ class HyperGraphRAG:
         batch_idx: int,
         chunk_batch: List[Dict[str, Any]],
         db_semaphore: asyncio.Semaphore,
-        task_semaphore: asyncio.Semaphore,
-        batch_id: str
+        task_semaphore: asyncio.Semaphore
     ) -> Dict[str, Any]:
         """Wrapper to process batch with semaphore"""
         async with task_semaphore:
-            return await self._process_chunk_batch_and_store(batch_idx, chunk_batch, db_semaphore, batch_id)
+            return await self._process_chunk_batch_and_store(batch_idx, chunk_batch, db_semaphore)
 
     async def _process_chunk_batch_and_store(
         self,
         batch_idx: int,
         chunk_batch: List[Dict[str, Any]],
-        db_semaphore: asyncio.Semaphore,
-        batch_id: str
+        db_semaphore: asyncio.Semaphore
     ) -> Dict[str, Any]:
         """Process a batch of chunks: Extract -> Embed -> Store"""
         
-        # Extract entities and hyperedges
+        # Extract entities and hyperedges (handles doc_id internally)
         batch_entities, batch_hyperedges = await self._extract_from_chunks(chunk_batch)
         
         # Generate embeddings (Hyperedges instead of Chunks)
@@ -343,8 +324,7 @@ class HyperGraphRAG:
             await self._store_batch(
                 batch_entities, batch_hyperedges,
                 chunk_batch, hyperedge_embeddings,
-                entity_embeddings,
-                batch_id
+                entity_embeddings
             )
         
         return {
@@ -360,13 +340,38 @@ class HyperGraphRAG:
         top_n: int = 10
     ) -> QueryResult:
         """
-        Local search: Find best hyperedges connected to relevant entities using Vector Search.
+        Local search: Find best hyperedges connected to relevant entities using Hybrid Search.
         """
         logger.debug(f"Starting local search with top_n={top_n}")
         
-        # Step 1: Get initial entities from Neo4j (Vector Search)
+        # Step 0: Identify relevant documents via BM25
+        try:
+            top_docs = await asyncio.to_thread(
+                self.neo4j.get_top_documents_by_bm25,
+                query_text,
+                top_k=3 
+            )
+            logger.debug(f"Identified relevant documents via BM25: {top_docs}")
+        except Exception as e:
+            logger.warning(f"BM25 Document search failed, falling back to pure vector search: {e}")
+            top_docs = []
+
+        # Step 1: Hybrid Entity Search (Global Vector + Document Bias)
         query_embedding = self.embedding.generate_embedding(query_text)
-        top_entities = await self._search_initial_entities(query_embedding, top_n)
+        
+        global_k = int(top_n * 0.7)
+        local_k = top_n - global_k
+        
+        # Ensure minimum counts
+        if global_k < 3: global_k = top_n
+        if top_docs and local_k < 2: local_k = 2
+
+        top_entities = await self._search_initial_entities_hybrid(
+            query_embedding, 
+            global_k, 
+            local_k, 
+            top_docs
+        )
         
         entities_found = [e["name"] for e in top_entities]
         
@@ -392,9 +397,10 @@ class HyperGraphRAG:
     def _chunk_documents(
         self, 
         documents: List[str], 
-        metadata: Optional[List[Dict[str, Any]]]
+        metadata: Optional[List[Dict[str, Any]]],
+        doc_ids: List[str]
     ) -> List[Dict[str, Any]]:
-        """Helper to chunk all documents"""
+        """Split documents into chunks and attach metadata/doc_ids"""
         if metadata is None:
             metadata = [{}] * len(documents)
         
@@ -404,14 +410,13 @@ class HyperGraphRAG:
         all_chunks = []
         logger.debug("Chunking documents...")
         
-        for doc_idx, (doc, doc_metadata) in enumerate(zip(documents, metadata)):
+        for doc_idx, (doc, doc_metadata, doc_id) in enumerate(zip(documents, metadata, doc_ids)):
             chunks = self.text_processor.chunk_text(
                 doc,
                 chunk_size=self.chunk_size,
                 chunk_overlap=self.chunk_overlap
             )
             
-            # Add document metadata to each chunk
             for chunk in chunks:
                 chunk["metadata"] = {
                     **doc_metadata,
@@ -420,6 +425,7 @@ class HyperGraphRAG:
                     "start_idx": chunk["start_idx"],
                     "end_idx": chunk["end_idx"]
                 }
+                chunk["doc_id"] = doc_id
             all_chunks.extend(chunks)
             
         logger.debug(f"Created {len(all_chunks)} chunks")
@@ -431,39 +437,33 @@ class HyperGraphRAG:
     ) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Extract entities and hyperedges from a batch of chunks.
-        Filters out entities that are not part of any hyperedge to prevent orphan nodes.
         """
-        all_potential_entities = {} # All entities extracted by LLM
-        batch_hyperedges = []
-        
-        # Process chunks concurrently using gather
-        extraction_tasks = []
-        for chunk in chunk_batch:
-            extraction_tasks.append(
-                asyncio.to_thread(
-                    self.llm_extractor.extract_data,
-                    chunk["content"]
-                )
-            )
-        
-        # Run extractions in parallel
+        # Parallel extraction
+        extraction_tasks = [
+            asyncio.to_thread(self.llm_extractor.extract_data, chunk["content"])
+            for chunk in chunk_batch
+        ]
         extraction_results = await asyncio.gather(*extraction_tasks)
         
-        # Process results
+        all_potential_entities = {}
+        batch_hyperedges = []
+        
         for idx, (entities, hyperedges) in enumerate(extraction_results):
             chunk = chunk_batch[idx]
+            doc_id = chunk["doc_id"]
             
-            # 1. Collect all potential entities from this chunk
+            # Collect potential entities
             for entity in entities:
-                all_potential_entities[entity.name] = {
+                key = (entity.name, doc_id)
+                all_potential_entities[key] = {
                     "name": entity.name,
-                    "description": entity.description
+                    "description": entity.description,
+                    "doc_id": doc_id
                 }
             
-            # 2. Process hyperedges
+            # Process hyperedges
             for hyperedge in hyperedges:
                 entity_names_sorted = sorted(hyperedge.entity_names)
-                # Create ID based on content and connected entities
                 hyperedge_id = hashlib.md5(
                     f"{hyperedge.content}_{'_'.join(entity_names_sorted)}".encode()
                 ).hexdigest()
@@ -473,154 +473,137 @@ class HyperGraphRAG:
                     "entity_names": hyperedge.entity_names,
                     "content": hyperedge.content,
                     "chunk_id": chunk["id"],
-                    "metadata": chunk.get("metadata", {})
+                    "metadata": {**chunk.get("metadata", {}), **(hyperedge.metadata or {})},
+                    "doc_id": doc_id
                 })
 
-        # 3. Filter entities: Only keep those used in hyperedges
-        used_entity_names = set()
-        for h in batch_hyperedges:
-            used_entity_names.update(h["entity_names"])
-            
-        batch_entities = {}
-        for name in used_entity_names:
-            if name in all_potential_entities:
-                # Use extracted info (description)
-                batch_entities[name] = all_potential_entities[name]
-            else:
-                # Implicit entity found in hyperedge but not in entity list
-                batch_entities[name] = {
-                    "name": name,
-                    "description": "Extracted from hyperedge relationship"
-                }
+        # Resolve entities (ensure referential integrity within doc scope)
+        batch_entities = self._resolve_entities_for_hyperedges(
+            batch_hyperedges, all_potential_entities
+        )
         
         return batch_entities, batch_hyperedges
+
+    def _resolve_entities_for_hyperedges(
+        self,
+        hyperedges: List[Dict[str, Any]],
+        available_entities: Dict[Tuple[str, str], Dict[str, Any]]
+    ) -> Dict[Tuple[str, str], Dict[str, Any]]:
+        """Filter and consolidate entities that are actually used in hyperedges."""
+        resolved_entities = {}
+        
+        for h in hyperedges:
+            doc_id = h["doc_id"]
+            for name in h["entity_names"]:
+                key = (name, doc_id)
+                if key in available_entities:
+                    resolved_entities[key] = available_entities[key]
+                else:
+                    # Implicit entity extraction from relationship
+                    resolved_entities[key] = {
+                        "name": name,
+                        "description": "Extracted from hyperedge relationship",
+                        "doc_id": doc_id
+                    }
+        return resolved_entities
 
     async def _generate_batch_embeddings(
         self,
         batch_hyperedges: List[Dict[str, Any]],
-        batch_entities: Dict[str, Dict[str, Any]]
+        batch_entities: Dict[Tuple[str, str], Dict[str, Any]]
     ) -> Tuple[List[List[float]], List[List[float]]]:
-        """
-        Generate embeddings for hyperedges and entities in a batch
-        """
+        """Generate embeddings for hyperedges and entities in a batch"""
+        # 1. Hyperedge embeddings
         hyperedge_contents = [h["content"] for h in batch_hyperedges]
+        hyperedge_embeddings = []
         if hyperedge_contents:
             hyperedge_embeddings = await asyncio.to_thread(
                 self.embedding.generate_embeddings,
                 hyperedge_contents
             )
-        else:
-             hyperedge_embeddings = []
         
-        # Prepare entity texts for embedding (inline logic, removed _prepare_entity_embeddings)
+        # 2. Entity embeddings
         entity_texts = []
-        # entity_data_list removal: We rely on batch_entities ordering
-        
-        for entity_name, entity_info in batch_entities.items():
-            # description is optional
+        for entity_info in batch_entities.values():
+            name = entity_info["name"]
             desc = entity_info.get("description")
-            if desc:
-                text = f"{entity_name}: {desc}"
-            else:
-                text = entity_name
-                
+            text = f"{name}: {desc}" if desc else name
             entity_texts.append(text)
 
+        entity_embeddings = []
         if entity_texts:
             entity_embeddings = await asyncio.to_thread(
                 self.embedding.generate_embeddings,
                 entity_texts
             )
-        else:
-            entity_embeddings = []
         
         return hyperedge_embeddings, entity_embeddings
 
     async def _store_batch(
         self,
-        batch_entities: Dict[str, Dict[str, Any]],
+        batch_entities: Dict[Tuple[str, str], Dict[str, Any]],
         batch_hyperedges: List[Dict[str, Any]],
         chunk_batch: List[Dict[str, Any]],
         hyperedge_embeddings: List[List[float]],
-        entity_embeddings: List[List[float]],
-        batch_id: str
+        entity_embeddings: List[List[float]]
     ) -> None:
-        """Store extracted data to Neo4j (including vectors for entities and hyperedges)"""
-        import time
-        start_time = time.time()
-        
-        # 1. Store entities with vectors
-        t0 = time.time()
+        """Store extracted data to Neo4j"""
+        # 1. Entities
         if batch_entities:
-            await self._store_entities(batch_entities, entity_embeddings, batch_id)
-        t1 = time.time()
-        logger.debug(f"[Profile] Store Entities ({len(batch_entities)}): {t1-t0:.4f}s")
+            await self._store_entities(batch_entities, entity_embeddings)
         
-        # 2. Store Chunks (NO vectors)
-        t0 = time.time()
+        # 2. Chunks
         if chunk_batch:
-            await self._store_chunks(chunk_batch, batch_id)
-        t1 = time.time()
-        logger.debug(f"[Profile] Store Chunks ({len(chunk_batch)}): {t1-t0:.4f}s")
+            await self._store_chunks(chunk_batch)
 
-        # 3. Store Hyperedges with vectors
-        t0 = time.time()
+        # 3. Hyperedges
         if batch_hyperedges:
-            await self._store_hyperedges(batch_hyperedges, hyperedge_embeddings, batch_id)
-        t1 = time.time()
-        logger.debug(f"[Profile] Store Hyperedges ({len(batch_hyperedges)}): {t1-t0:.4f}s")
-        
-        total_time = time.time() - start_time
-        logger.debug(f"[Profile] Total Batch Store Time: {total_time:.4f}s")
+            await self._store_hyperedges(batch_hyperedges, hyperedge_embeddings)
 
     async def _store_entities(
         self, 
-        batch_entities: Dict[str, Dict[str, Any]], 
-        entity_embeddings: List[List[float]],
-        batch_id: str
+        batch_entities: Dict[Tuple[str, str], Dict[str, Any]], 
+        entity_embeddings: List[List[float]]
     ) -> None:
         """Helper to store entities"""
         entities_to_store = []
-        entity_keys = list(batch_entities.keys())
+        # Values iteration order is preserved in Python 3.7+
+        entity_values = list(batch_entities.values())
         
-        if len(entity_keys) == len(entity_embeddings):
-            for i, key in enumerate(entity_keys):
-                info = batch_entities[key]
+        if len(entity_values) == len(entity_embeddings):
+            for i, info in enumerate(entity_values):
                 info_with_vector = info.copy()
                 info_with_vector["vector"] = entity_embeddings[i]
                 entities_to_store.append(info_with_vector)
         else:
-            # Fallback: Store without vectors if count mismatch (should not happen)
             logger.warning("Entity embedding count mismatch. Storing entities without vectors.")
             entities_to_store = list(batch_entities.values())
         
         await asyncio.to_thread(
             self.neo4j.batch_create_entities, 
-            entities_to_store,
-            batch_id
+            entities_to_store
         )
 
-    async def _store_chunks(self, chunk_batch: List[Dict[str, Any]], batch_id: str) -> None:
+    async def _store_chunks(self, chunk_batch: List[Dict[str, Any]]) -> None:
         """Helper to store chunks"""
         chunks_to_store = [
             {
                 "chunk_id": chunk["id"],
                 "content": chunk["content"],
-                "metadata": chunk.get("metadata", {})
+                "metadata": chunk.get("metadata", {}),
+                "doc_id": chunk["doc_id"]
             }
             for chunk in chunk_batch
         ]
         await asyncio.to_thread(
             self.neo4j.batch_create_chunks,
-            chunks_to_store,
-            batch_id
+            chunks_to_store
         )
 
     async def _store_hyperedges(
         self, 
         batch_hyperedges: List[Dict[str, Any]], 
-        hyperedge_embeddings: List[List[float]],
-        batch_id: str
+        hyperedge_embeddings: List[List[float]]
     ) -> None:
         """Helper to store hyperedges"""
         hyperedges_to_store = []
@@ -631,27 +614,24 @@ class HyperGraphRAG:
 
         await asyncio.to_thread(
             self.neo4j.batch_create_hyperedges,
-            hyperedges_to_store,
-            batch_id
+            hyperedges_to_store
         )
 
-    async def _search_initial_entities(
+    async def _search_initial_entities_hybrid(
         self,
         query_embedding: List[float],
-        top_n: int
+        k_global: int,
+        k_local: int,
+        doc_ids: List[str]
     ) -> List[Dict[str, Any]]:
-        """Search for initial entities in Neo4j (Vector Search)"""
-        logger.debug("Searching for similar entities in Neo4j...")
+        """Search for initial entities using Hybrid approach"""
         entity_results = await asyncio.to_thread(
-            self.neo4j.search_vectors,
-            query_embedding,
-            top_n,
-            target_node="Entity"
+            self.neo4j.search_vectors_with_document_bias,
+            query_vector=query_embedding,
+            top_k_global=k_global,
+            top_k_local=k_local,
+            focus_doc_ids=doc_ids
         )
-        
-        logger.debug(f"Found {len(entity_results)} entities from Neo4j search")
-        for i, ent in enumerate(entity_results[:5], 1):
-            logger.debug(f"  {i}. {ent['name']} (similarity: {ent['score']:.4f})")
         
         return [
             {

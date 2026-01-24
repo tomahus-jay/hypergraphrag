@@ -1,6 +1,9 @@
 import asyncio
 import os
 import warnings
+import json
+import pickle
+import pandas as pd
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
@@ -9,68 +12,39 @@ load_dotenv()
 # Filter multiprocessing resource tracker warning
 warnings.filterwarnings("ignore", message=".*resource_tracker.*")
 
-import pandas as pd
-from datasets import load_dataset
 from ragas import evaluate
 from ragas.metrics import context_recall, context_precision
 from hypergraphrag import HyperGraphRAG
+from datasets import Dataset
 
 # ---------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------
-SAMPLE_SIZE = 1000
 TOP_K = 5
-MAX_HOPS = 2
+DATASET_PATH = "hotpot_qa_dataset.pkl"
 
 async def main():
-    print("🚀 Starting HotpotQA Evaluation with Ragas...")
+    print("🚀 Starting Ragas Evaluation...")
     
-    # 1. Load HotpotQA Dataset
-    print("📦 Loading HotpotQA dataset (distractor)...")
-    dataset = load_dataset("hotpot_qa", "distractor", split="validation")
-    
-    # Select a subset
-    subset = dataset.select(range(SAMPLE_SIZE))
-    print(f"📊 Evaluated samples: {len(subset)}")
-    
-    # 2. Bulk Insert Data (Simulate realistic retrieval environment)
-    # print("preparing documents for bulk insert...")
-    # all_documents = []
-    # all_metadatas = []
-    # seen_titles = set()
+    if not os.path.exists(DATASET_PATH):
+        print(f"❌ Dataset file not found: {DATASET_PATH}")
+        print("Please run 01_prepare_data.py first.")
+        return
 
-    # Collect ALL contexts from the subset
-    # for sample in subset:
-    #     context = sample["context"] # {'title': [], 'sentences': []}
-    #     for title, sentences in zip(context["title"], context["sentences"]):
-    #         if title not in seen_titles:
-    #             doc_content = f"{title}\n" + " ".join(sentences)
-    #             all_documents.append(doc_content)
-    #             all_metadatas.append({"title": title, "source": "hotpot_qa"})
-    #             seen_titles.add(title)
-    
-    # print(f"📝 Bulk Inserting {len(all_documents)} unique documents...")
-    
+    # Load dataset
+    print(f"📦 Loading dataset from {DATASET_PATH}...")
+    with open(DATASET_PATH, "rb") as f:
+        subset = pickle.load(f)
+    print(f"📊 Evaluated samples: {len(subset)}")
+
     # Initialize RAG Client (Will use .env settings for model)
     rag = HyperGraphRAG(
         chunk_size=768,
         chunk_overlap=50,
-        llm_request_timeout=300.0  # Increase timeout to 5 minutes to avoid timeouts
+        llm_request_timeout=300.0
     )
     
     try:
-        # Reset DB once
-        # rag.reset_database()
-        
-        # Bulk Insert
-        # Lower concurrency to avoid overloading the LLM server/API
-        # await rag.add(
-        #     documents=all_documents, 
-        #     metadata=all_metadatas,
-        #     batch_size=5,
-        #     max_concurrent_tasks=10
-        # )
-        
         # 3. Query & Collect Results
         print("🔍 Querying and collecting results...")
         ragas_data = {
@@ -94,22 +68,31 @@ async def main():
             
             if not ground_truth_sentences:
                 continue
-
+            
             # Retrieval
-            result = await rag.query_local(
+            result = await rag.query(
                 query_text=question,
-                top_n=TOP_K,
-                max_hops=MAX_HOPS
+                top_n=TOP_K
             )
             
-            retrieved_contexts = [chunk.content for chunk in result.top_chunks]
+            # Extract chunks from hyperedges for Ragas
+            retrieved_chunks = []
+            for he in result.hyperedges:
+                if he.chunk:
+                    retrieved_chunks.append(he.chunk.content)
+                else:
+                    # Fallback if chunk not populated (should rely on chunk data)
+                    retrieved_chunks.append(he.content)
+            
+            # Take top K unique contents
+            retrieved_contexts = list(dict.fromkeys(retrieved_chunks))[:TOP_K]
             
             ragas_data["question"].append(question)
             ragas_data["contexts"].append(retrieved_contexts)
             ragas_data["ground_truth"].append(ground_truth_sentences)
             
             if (i+1) % 5 == 0:
-                print(f"   Processed {i+1}/{SAMPLE_SIZE} queries...")
+                print(f"   Processed {i+1}/{len(subset)} queries...")
 
     finally:
         rag.close()
@@ -122,7 +105,6 @@ async def main():
     # Join ground truths for Ragas compatibility
     df["ground_truth"] = df["ground_truth"].apply(lambda x: "\n".join(x))
     
-    from datasets import Dataset
     ragas_dataset = Dataset.from_pandas(df)
     
     # Run evaluation
@@ -153,6 +135,11 @@ async def main():
     cols_to_show = [c for c in cols_to_show if c in res_df.columns]
     
     print(res_df[cols_to_show])
+
+    # Save results to CSV
+    output_file = "ragas_evaluation_results.csv"
+    res_df.to_csv(output_file, index=False)
+    print(f"\n💾 Results saved to {output_file}")
 
 if __name__ == "__main__":
     asyncio.run(main())

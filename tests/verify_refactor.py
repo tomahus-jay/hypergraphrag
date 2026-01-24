@@ -7,8 +7,6 @@ from unittest.mock import MagicMock, patch
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # Import the module explicitly so we can patch the object on it
-# Note: We must mock imports that might trigger connections or side effects if imported at top level
-# But assuming client.py imports are safe (classes only), we import it.
 try:
     from hypergraphrag import client
 except ImportError:
@@ -31,20 +29,16 @@ async def verify():
         mock_embed_instance.dimension = 384
         mock_embed_instance.generate_embedding.return_value = [0.1]*384
         
-        mock_neo4j_instance.search_vectors.return_value = [
+        # Mock step 0: BM25
+        mock_neo4j_instance.get_top_documents_by_bm25.return_value = ["doc1", "doc2"]
+
+        # Mock step 1: Hybrid Search
+        # This replaces search_vectors for the initial entity search
+        mock_neo4j_instance.search_vectors_with_document_bias.return_value = [
             {"name": "SpaceX", "score": 0.9}
         ]
         
         # Mock get_best_hyperedges_with_entities
-        # It's called for each entity found ("SpaceX").
-        # We simulate returning the "best" hyperedge based on vector similarity.
-        # But wait, we want to test that client handles the result correctly.
-        # Logic: 
-        # 1. search_vectors returns "SpaceX"
-        # 2. get_best_hyperedges_with_entities called for "SpaceX".
-        # 3. It should return the best hyperedge.
-        
-        # Let's say it returns h1 (high score).
         mock_neo4j_instance.get_best_hyperedges_with_entities.return_value = [
             {
                 "hyperedge_id": "h1",
@@ -56,13 +50,12 @@ async def verify():
             }
         ]
         
-        # Chunks retrieval - verify simple fetch (no vector needed)
+        # Chunks retrieval
         mock_neo4j_instance.get_chunks_by_ids.return_value = [
             {
                 "id": "c1",
                 "content": "Full chunk content...",
                 "metadata": {"source": "test"}
-                # No vector here anymore!
             }
         ]
         
@@ -92,12 +85,11 @@ async def verify():
         assert result.hyperedges[0].chunk_id == "c1"
         assert result.hyperedges[0].chunk is not None
         assert result.hyperedges[0].chunk.id == "c1"
-        # Check that we DO actually call the new Neo4j method
-        mock_neo4j_instance.get_best_hyperedges_with_entities.assert_called_once()
         
-        # Verify NO Calls to old chunk embedding logic methods or similarity calc in python
-        # We can't easily verify "no similarity calc" without mocking numpy, but we can verify calls
-        # to get_chunks_by_ids was only for content ID resolution
+        # Verify calls
+        mock_neo4j_instance.get_top_documents_by_bm25.assert_called_once()
+        mock_neo4j_instance.search_vectors_with_document_bias.assert_called_once()
+        mock_neo4j_instance.get_best_hyperedges_with_entities.assert_called_once()
         
         print("\nVerification Successful!")
 
